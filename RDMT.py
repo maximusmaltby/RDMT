@@ -189,7 +189,115 @@ def decrypt_text(encrypted_text):
     
 def null_button():
     return
+
+def safe_read_file(file_path, as_lines=False):
+    """Read a file trying utf-8-sig first, falling back to latin-1 (which accepts any byte).
+    Returns (content_or_lines, encoding_used)."""
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            with open(file_path, "r", encoding=enc) as f:
+                if as_lines:
+                    return f.readlines(), enc
+                else:
+                    return f.read(), enc
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    raise ValueError(f"Could not read file: {file_path}")
+
+def three_way_merge(base_lines, a_lines, b_lines, conflict_resolution='A'):
+    """
+    Perform a proper three-way merge using sync-region alignment.
     
+    base_lines: the original unmodified game file
+    a_lines:    modified by mod A
+    b_lines:    modified by mod B
+    conflict_resolution: 'A' to prefer File A, 'B' to prefer File B, 'original' to keep base
+    
+    Returns (merged_lines, conflicts) where conflicts is a list of dicts.
+    """
+    sm_a = SequenceMatcher(None, base_lines, a_lines, autojunk=False)
+    sm_b = SequenceMatcher(None, base_lines, b_lines, autojunk=False)
+    
+    matches_a = sm_a.get_matching_blocks()
+    matches_b = sm_b.get_matching_blocks()
+    
+    sync_regions = []
+    for ma in matches_a:
+        if ma.size == 0:
+            continue
+        for mb in matches_b:
+            if mb.size == 0:
+                continue
+            start = max(ma.a, mb.a)
+            end = min(ma.a + ma.size, mb.a + mb.size)
+            if start < end:
+                a_start = ma.b + (start - ma.a)
+                b_start = mb.b + (start - mb.a)
+                sync_regions.append((start, a_start, b_start, end - start))
+    
+    sync_regions.sort(key=lambda x: x[0])
+    
+    cleaned = []
+    for region in sync_regions:
+        if cleaned and region[0] < cleaned[-1][0] + cleaned[-1][3]:
+            if region[3] > cleaned[-1][3]:
+                cleaned[-1] = region
+        else:
+            cleaned.append(region)
+    sync_regions = cleaned
+    
+    merged = []
+    conflicts = []
+    base_pos = 0
+    a_pos = 0
+    b_pos = 0
+    
+    for base_sync, a_sync, b_sync, size in sync_regions:
+        base_gap = base_lines[base_pos:base_sync]
+        a_gap = a_lines[a_pos:a_sync]
+        b_gap = b_lines[b_pos:b_sync]
+        
+        if a_gap == b_gap:
+            merged.extend(a_gap)
+        elif a_gap == base_gap:
+            merged.extend(b_gap)
+        elif b_gap == base_gap:
+            merged.extend(a_gap)
+        else:
+            conflicts.append({'base': base_gap, 'a': a_gap, 'b': b_gap})
+            if conflict_resolution == 'A':
+                merged.extend(a_gap)
+            elif conflict_resolution == 'B':
+                merged.extend(b_gap)
+            else:
+                merged.extend(base_gap)
+        
+        merged.extend(base_lines[base_sync:base_sync + size])
+        base_pos = base_sync + size
+        a_pos = a_sync + size
+        b_pos = b_sync + size
+    
+    base_gap = base_lines[base_pos:]
+    a_gap = a_lines[a_pos:]
+    b_gap = b_lines[b_pos:]
+    
+    if a_gap == b_gap:
+        merged.extend(a_gap)
+    elif a_gap == base_gap:
+        merged.extend(b_gap)
+    elif b_gap == base_gap:
+        merged.extend(a_gap)
+    else:
+        conflicts.append({'base': base_gap, 'a': a_gap, 'b': b_gap})
+        if conflict_resolution == 'A':
+            merged.extend(a_gap)
+        elif conflict_resolution == 'B':
+            merged.extend(b_gap)
+        else:
+            merged.extend(base_gap)
+    
+    return merged, conflicts
+
 # NXMProxy
 def is_nxmproxy_setup():
     """Check if NXMProxy is set up correctly for RDMT and Red Dead Redemption 2."""
@@ -554,7 +662,7 @@ def check_for_update(version_label, main_window):
         response.raise_for_status()
         remote_version = response.text.strip()
 
-        if remote_version != "2.0.2":
+        if remote_version != "2.0.3":
             version_label.configure(
                 text=f"Update {remote_version} Available!",
                 text_color="#f88379",
@@ -2284,7 +2392,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
     settings_button = ctk.CTkButton(button_frame, text="Settings", font=("Segoe UI", 18, "bold"), fg_color="#b22222", hover_color="#8b0000", height=40, border_spacing=10)
     settings_button.pack(fill="x", padx=10, pady=5)
     
-    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.2", font=("Segoe UI", 18, "bold"))
+    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.3", font=("Segoe UI", 18, "bold"))
     version_label.grid(row=5, column=0, sticky="s", padx=10, pady=0)
     
     check_for_update(version_label, main_window)
@@ -2325,8 +2433,9 @@ def display_main_window(app, mods, conflicts, lml_folder):
              "conflicts with mods you haven't even downloaded yet! RDMT also offers download and\n"
              "install support for both ASI and LML mods from Nexus Mods\n"
              "(non-premium users must download through the Nexus Mods website).\n\n\n"
-             "Version 2.0.2 changelog:\n"
+             "Version 2.0.3 changelog:\n"
              "-----\n"
+             "- Rebuilt merge tool logic and fixed crashes.\n"
              "- Fixed first-time setup bugs.\n"
              "-----\n\n"
              "Version 2.0.0 changelog:\n"
@@ -2394,7 +2503,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
 
     up_button = ctk.CTkButton(
         mod_button_frame,
-        text="▲",
+        text="â–²",
         width=30,
         height=30,
         fg_color="#b22222",
@@ -2405,7 +2514,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
 
     down_button = ctk.CTkButton(
         mod_button_frame,
-        text="▼",
+        text="â–¼",
         width=30,
         height=30,
         fg_color="#b22222",
@@ -2965,7 +3074,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
     # Merge frame
 
     def auto_merge(fileA_path, fileB_path, main_window):
-        """Merge two XML files with optional manual conflict resolution or auto-merge."""
+        """Merge two files using proper 3-way merge (with original game file) or manual 2-way merge."""
         stop_thread = threading.Event()
 
         def merge_files():
@@ -2985,12 +3094,12 @@ def display_main_window(app, mods, conflicts, lml_folder):
                 if merge_mode == "cancel":
                     return
 
-                with open(fileA_path.get(), "r", encoding="utf-8-sig") as fA, open(fileB_path.get(), "r", encoding="utf-8-sig") as fB:
-                    fileA_lines = fA.readlines()
-                    fileB_lines = fB.readlines()
+                fileA_lines, enc_a = safe_read_file(fileA_path.get(), as_lines=True)
+                fileB_lines, enc_b = safe_read_file(fileB_path.get(), as_lines=True)
+                write_encoding = enc_a if enc_a != "latin-1" else enc_b if enc_b != "latin-1" else "latin-1"
 
-                normalized_inputs = sorted([fileA_lines, fileB_lines], key=lambda x: "".join(x))
-                fileA_lines, fileB_lines = normalized_inputs
+                merged_lines = []
+                conflicts = []
 
                 if merge_mode == "auto-merge":
                     original_file = None
@@ -3010,122 +3119,199 @@ def display_main_window(app, mods, conflicts, lml_folder):
                     if not original_file:
                         return
 
-                    with open(original_file, "r", encoding="utf-8-sig") as fC:
-                        fileC_lines = fC.readlines()
+                    fileC_lines, _ = safe_read_file(original_file, as_lines=True)
 
-                    merged_lines = []
-                    conflicts_detected = False
+                    progress_ready = threading.Event()
+                    progress_bar_holder = [None]
+                    progress_dialog_holder = [None]
 
                     def show_progress():
-                        nonlocal progress_dialog
-                        progress_dialog = ctk.CTkToplevel(main_window)
-                        progress_dialog.title("Merging Files...")
-                        progress_dialog.attributes('-topmost', True)
-                        progress_dialog.focus_set()
-                        progress_dialog.grab_set()
+                        dlg = ctk.CTkToplevel(main_window)
+                        dlg.title("Merging Files...")
+                        dlg.attributes('-topmost', True)
+                        dlg.focus_set()
+                        dlg.grab_set()
 
-                        screen_width = progress_dialog.winfo_screenwidth()
-                        screen_height = progress_dialog.winfo_screenheight()
+                        screen_width = dlg.winfo_screenwidth()
+                        screen_height = dlg.winfo_screenheight()
                         initial_width = min(400, int(screen_width * 0.9))
                         initial_height = min(50, int(screen_height * 0.9))
-
                         x = max(0, (screen_width - initial_width) // 2)
                         y = max(0, (screen_height - initial_height) // 2)
-                        progress_dialog.geometry(f"{initial_width}x{initial_height}+{x}+{y}")
-                        progress_dialog.resizable(False, False)
+                        dlg.geometry(f"{initial_width}x{initial_height}+{x}+{y}")
+                        dlg.resizable(False, False)
 
                         icon_path = os.path.join(image_path, "rdmt.ico")
-                        progress_dialog.after(201, lambda: progress_dialog.iconbitmap(icon_path))
+                        dlg.after(201, lambda: dlg.iconbitmap(icon_path))
 
-                        progress_bar = ctk.CTkProgressBar(progress_dialog, width=300, progress_color="#b22222")
-                        progress_bar.pack(pady=10)
-                        progress_bar.set(0)
+                        pbar = ctk.CTkProgressBar(dlg, width=300, progress_color="#b22222")
+                        pbar.pack(pady=10)
+                        pbar.set(0)
 
                         def on_close():
                             stop_thread.set()
-                            progress_dialog.destroy()
+                            dlg.destroy()
 
-                        progress_dialog.protocol("WM_DELETE_WINDOW", on_close)
-                        return progress_bar
+                        dlg.protocol("WM_DELETE_WINDOW", on_close)
+                        progress_bar_holder[0] = pbar
+                        progress_dialog_holder[0] = dlg
+                        progress_ready.set()
 
-                    progress_bar = show_progress()
-                    main_window.after(0, lambda: progress_bar)
+                    main_window.after(0, show_progress)
+                    progress_ready.wait()
+                    progress_dialog = progress_dialog_holder[0]
 
-                    matcher_c_to_a = SequenceMatcher(None, fileC_lines, fileA_lines)
-                    matcher_c_to_b = SequenceMatcher(None, fileC_lines, fileB_lines)
+                    if stop_thread.is_set():
+                        return
 
-                    total_blocks = len(list(matcher_c_to_a.get_opcodes()))
-                    processed_blocks = 0
+                    main_window.after(0, lambda: progress_bar_holder[0].set(0.1))
 
-                    c_index = 0
-                    for tag_c, i1_c, i2_c, _, _ in matcher_c_to_a.get_opcodes():
-                        if stop_thread.is_set():
-                            return
+                    merged_lines, conflicts = three_way_merge(
+                        fileC_lines, fileA_lines, fileB_lines, conflict_resolution='A'
+                    )
 
-                        while progress_bar is None:
+                    if stop_thread.is_set():
+                        return
+
+                    main_window.after(0, lambda: progress_bar_holder[0].set(0.7))
+
+                    if conflicts:
+                        resolution_mode = None
+                        def ask_resolution_mode():
+                            nonlocal resolution_mode
+                            resolution_mode = conflict_resolution_mode_dialog(main_window)
+
+                        main_window.after(0, ask_resolution_mode)
+                        while resolution_mode is None:
+                            if stop_thread.is_set():
+                                return
                             time.sleep(0.1)
 
-                        main_window.after(0, lambda value=processed_blocks / total_blocks: progress_bar.set(value))
+                        if resolution_mode == "cancel":
+                            main_window.after(0, progress_dialog.destroy)
+                            return
 
-                        while c_index < i1_c:
-                            merged_lines.append(fileC_lines[c_index])
-                            c_index += 1
+                        if resolution_mode in ("A", "B", "original"):
+                            merged_lines, conflicts = three_way_merge(
+                                fileC_lines, fileA_lines, fileB_lines,
+                                conflict_resolution=resolution_mode
+                            )
+                        elif resolution_mode == "manual":
+                            merged_lines = []
 
-                        block_a = fileA_lines[i1_c:i2_c]
-                        block_b = fileB_lines[i1_c:i2_c]
+                            sm_a = SequenceMatcher(None, fileC_lines, fileA_lines, autojunk=False)
+                            sm_b = SequenceMatcher(None, fileC_lines, fileB_lines, autojunk=False)
+                            matches_a = sm_a.get_matching_blocks()
+                            matches_b = sm_b.get_matching_blocks()
 
-                        if tag_c == "equal":
-                            merged_lines.extend(block_a)
-                            c_index = i2_c
-                        else:
-                            for i in range(i1_c, i2_c):
-                                line_a = fileA_lines[i] if i < len(fileA_lines) else None
-                                line_b = fileB_lines[i] if i < len(fileB_lines) else None
+                            sync_regions = []
+                            for ma in matches_a:
+                                if ma.size == 0:
+                                    continue
+                                for mb in matches_b:
+                                    if mb.size == 0:
+                                        continue
+                                    start = max(ma.a, mb.a)
+                                    end = min(ma.a + ma.size, mb.a + mb.size)
+                                    if start < end:
+                                        a_start = ma.b + (start - ma.a)
+                                        b_start = mb.b + (start - mb.a)
+                                        sync_regions.append((start, a_start, b_start, end - start))
 
-                                if line_a == line_b:
-                                    merged_lines.append(line_a)
-                                elif line_a and line_b:
-                                    line_c = fileC_lines[i] if i < len(fileC_lines) else None
-                                    if line_a == line_c:
-                                        merged_lines.append(line_b)
-                                    elif line_b == line_c:
-                                        merged_lines.append(line_a)
+                            sync_regions.sort(key=lambda x: x[0])
+                            cleaned = []
+                            for region in sync_regions:
+                                if cleaned and region[0] < cleaned[-1][0] + cleaned[-1][3]:
+                                    if region[3] > cleaned[-1][3]:
+                                        cleaned[-1] = region
+                                else:
+                                    cleaned.append(region)
+                            sync_regions = cleaned
+
+                            base_pos = 0
+                            a_pos = 0
+                            b_pos = 0
+
+                            for base_sync, a_sync, b_sync, size in sync_regions:
+                                if stop_thread.is_set():
+                                    return
+
+                                base_gap = fileC_lines[base_pos:base_sync]
+                                a_gap = fileA_lines[a_pos:a_sync]
+                                b_gap = fileB_lines[b_pos:b_sync]
+
+                                if a_gap == b_gap:
+                                    merged_lines.extend(a_gap)
+                                elif a_gap == base_gap:
+                                    merged_lines.extend(b_gap)
+                                elif b_gap == base_gap:
+                                    merged_lines.extend(a_gap)
+                                else:
+                                    choice = None
+                                    def ask_manual(a=a_gap, b=b_gap):
+                                        nonlocal choice
+                                        choice = manual_conflict_resolution_dialog(main_window, a, b)
+
+                                    main_window.after(0, ask_manual)
+                                    while choice is None:
+                                        if stop_thread.is_set():
+                                            return
+                                        time.sleep(0.1)
+
+                                    if choice == "A":
+                                        merged_lines.extend(a_gap)
+                                    elif choice == "B":
+                                        merged_lines.extend(b_gap)
+                                    elif choice == "cancel":
+                                        main_window.after(0, progress_dialog.destroy)
+                                        return
                                     else:
-                                        if not conflicts_detected:
-                                            resolution_mode = None
-                                            def ask_resolution_mode():
-                                                nonlocal resolution_mode
-                                                resolution_mode = conflict_resolution_mode_dialog(main_window)
+                                        merged_lines.extend(a_gap)
 
-                                            main_window.after(0, ask_resolution_mode)
-                                            while resolution_mode is None:
-                                                if stop_thread.is_set():
-                                                    return
-                                                time.sleep(0.1)
-                                        if resolution_mode == "A":
-                                            merged_lines.append(line_a)
-                                        elif resolution_mode == "B":
-                                            merged_lines.append(line_b)
-                                        else:
-                                            merged_lines.append(fileC_lines[i])
-                                elif line_a:
-                                    merged_lines.append(line_a)
-                                elif line_b:
-                                    merged_lines.append(line_b)
+                                merged_lines.extend(fileC_lines[base_sync:base_sync + size])
+                                base_pos = base_sync + size
+                                a_pos = a_sync + size
+                                b_pos = b_sync + size
 
-                        processed_blocks += 1
+                            base_gap = fileC_lines[base_pos:]
+                            a_gap = fileA_lines[a_pos:]
+                            b_gap = fileB_lines[b_pos:]
 
-                    merged_lines.extend(fileC_lines[c_index:])
+                            if a_gap == b_gap:
+                                merged_lines.extend(a_gap)
+                            elif a_gap == base_gap:
+                                merged_lines.extend(b_gap)
+                            elif b_gap == base_gap:
+                                merged_lines.extend(a_gap)
+                            else:
+                                choice = None
+                                def ask_manual_tail(a=a_gap, b=b_gap):
+                                    nonlocal choice
+                                    choice = manual_conflict_resolution_dialog(main_window, a, b)
 
+                                main_window.after(0, ask_manual_tail)
+                                while choice is None:
+                                    if stop_thread.is_set():
+                                        return
+                                    time.sleep(0.1)
+
+                                if choice == "A":
+                                    merged_lines.extend(a_gap)
+                                elif choice == "B":
+                                    merged_lines.extend(b_gap)
+                                else:
+                                    merged_lines.extend(a_gap)
+
+                    main_window.after(0, lambda: progress_bar_holder[0].set(1.0))
                     main_window.after(0, progress_dialog.destroy)
 
                 elif merge_mode == "manual":
-                    def manual_conflict_resolution(line_a, line_b):
+                    def manual_conflict_resolution(lines_a, lines_b):
                         choice = None
 
                         def ask_conflict_resolution():
                             nonlocal choice
-                            choice = manual_conflict_resolution_dialog(main_window, [line_a], [line_b])
+                            choice = manual_conflict_resolution_dialog(main_window, lines_a, lines_b)
 
                         main_window.after(0, ask_conflict_resolution)
                         while choice is None:
@@ -3135,7 +3321,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
 
                         return choice
 
-                    matcher_a_to_b = SequenceMatcher(None, fileA_lines, fileB_lines)
+                    matcher_a_to_b = SequenceMatcher(None, fileA_lines, fileB_lines, autojunk=False)
 
                     for tag, i1, i2, j1, j2 in matcher_a_to_b.get_opcodes():
                         if stop_thread.is_set():
@@ -3144,25 +3330,18 @@ def display_main_window(app, mods, conflicts, lml_folder):
                         if tag == "equal":
                             merged_lines.extend(fileA_lines[i1:i2])
                         elif tag == "replace":
-                            for k in range(max(i2 - i1, j2 - j1)):
-                                line_a = fileA_lines[i1 + k] if i1 + k < i2 else None
-                                line_b = fileB_lines[j1 + k] if j1 + k < j2 else None
-
-                                if line_a and line_b and line_a != line_b:
-                                    choice = manual_conflict_resolution(line_a, line_b)
-                                    if choice == "A":
-                                        merged_lines.append(line_a)
-                                    elif choice == "B":
-                                        merged_lines.append(line_b)
-                                    elif choice == "cancel":
-                                        return
-                                    else:
-                                        merged_lines.append(line_a + "\n")
-                                        merged_lines.append(line_b + "\n")
-                                elif line_a and not line_b:
-                                    merged_lines.append(line_a)
-                                elif line_b and not line_a:
-                                    merged_lines.append(line_b)
+                            block_a = fileA_lines[i1:i2]
+                            block_b = fileB_lines[j1:j2]
+                            choice = manual_conflict_resolution(block_a, block_b)
+                            if choice == "A":
+                                merged_lines.extend(block_a)
+                            elif choice == "B":
+                                merged_lines.extend(block_b)
+                            elif choice == "cancel":
+                                return
+                            else:
+                                merged_lines.extend(block_a)
+                                merged_lines.extend(block_b)
                         elif tag == "delete":
                             merged_lines.extend(fileA_lines[i1:i2])
                         elif tag == "insert":
@@ -3188,23 +3367,28 @@ def display_main_window(app, mods, conflicts, lml_folder):
                     time.sleep(0.1)
 
                 if save_path:
-                    with open(save_path, "w", encoding="utf-8") as f_out:
+                    with open(save_path, "w", encoding=write_encoding) as f_out:
                         f_out.writelines(merged_lines)
+
+                    conflict_msg = ""
+                    if conflicts:
+                        conflict_msg = f"\n\n{len(conflicts)} conflict(s) were resolved."
 
                     main_window.after(0, lambda: CTkMessagebox(
                         title="Red Dead Modding Tool",
-                        message=f"Files merged successfully to:\n{save_path}",
+                        message=f"Files merged successfully to:\n{save_path}{conflict_msg}",
                         button_color="#b22222",
                         button_hover_color="#8b0000",
                         fade_in_duration=0.05
                     ))
 
-            except Exception as e:
+            except Exception as exc:
+                error_msg = str(exc)
                 if progress_dialog:
                     main_window.after(0, progress_dialog.destroy)
-                main_window.after(0, lambda: CTkMessagebox(
+                main_window.after(0, lambda msg=error_msg: CTkMessagebox(
                     title="Error",
-                    message=f"An error occurred during the merge:\n{str(e)}",
+                    message=f"An error occurred during the merge:\n{msg}",
                     button_color="#b22222",
                     button_hover_color="#8b0000",
                     fade_in_duration=0.05,
@@ -3271,7 +3455,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
 
         screen_width = dialog.winfo_screenwidth()
         screen_height = dialog.winfo_screenheight()
-        initial_width = min(600, int(screen_width * 0.9))
+        initial_width = min(720, int(screen_width * 0.9))
         initial_height = min(150, int(screen_height * 0.9))
 
         x = max(0, (screen_width - initial_width) // 2)
@@ -3292,44 +3476,19 @@ def display_main_window(app, mods, conflicts, lml_folder):
 
         label = ctk.CTkLabel(
             dialog,
-            text=" Both mods edit the same code. Select how you want to resolve conflicts:",
+            text="Both mods edit the same lines. Select how you want to resolve conflicts:",
             font=("Segoe UI", 14, "bold"),
-            wraplength=350
+            wraplength=550
         )
         label.pack(pady=20)
 
         button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         button_frame.pack(pady=10)
 
-        file_a_button = ctk.CTkButton(
-            button_frame,
-            text="Always File A",
-            fg_color="#b22222",
-            hover_color="#8b0000",
-            font=("Segoe UI", 14, "bold"),
-            command=lambda: set_choice("A")
-        )
-        file_a_button.grid(row=0, column=0, padx=10)
-
-        file_b_button = ctk.CTkButton(
-            button_frame,
-            text="Always File B",
-            fg_color="#b22222",
-            hover_color="#8b0000",
-            font=("Segoe UI", 14, "bold"),
-            command=lambda: set_choice("B")
-        )
-        file_b_button.grid(row=0, column=1, padx=10)
-
-        manual_button = ctk.CTkButton(
-            button_frame,
-            text="Resolve Manually",
-            fg_color="#b22222",
-            hover_color="#8b0000",
-            font=("Segoe UI", 14, "bold"),
-            command=lambda: set_choice("manual")
-        )
-        manual_button.grid(row=0, column=2, padx=10)
+        ctk.CTkButton(button_frame, text="Always File A", fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold"), command=lambda: set_choice("A")).grid(row=0, column=0, padx=10)
+        ctk.CTkButton(button_frame, text="Always File B", fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold"), command=lambda: set_choice("B")).grid(row=0, column=1, padx=10)
+        ctk.CTkButton(button_frame, text="Keep Original", fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold"), command=lambda: set_choice("original")).grid(row=0, column=2, padx=10)
+        ctk.CTkButton(button_frame, text="Resolve Manually", fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold"), command=lambda: set_choice("manual")).grid(row=0, column=3, padx=10)
 
         dialog.transient(main_window)
         dialog.grab_set()
@@ -3476,10 +3635,6 @@ def display_main_window(app, mods, conflicts, lml_folder):
     fileA_linenums = TkLineNumbers(fileA_frame, fileA_textbox, justify="right", border=False, width=5, colors=("#7f7f7f", "#2b2b2b"))
     fileA_linenums.pack(side="left", fill="y", padx=(10,0), pady=10)
 
-    def on_modified(event):
-        fileA_textbox.edit_modified(False)
-        main_window.after_idle(linenums.redraw)
-
     fileA_textbox.bind("<<Modified>>", lambda event: main_window.after_idle(fileA_linenums.redraw), add=True)
     
     fileA_textbox.bind("<Button-1>", lambda e: "break")
@@ -3515,85 +3670,123 @@ def display_main_window(app, mods, conflicts, lml_folder):
     fileB_textbox.bind("<Shift-Right>", lambda e: "break")
 
     def browse_file(entry_field, textbox):
-        """Open file dialog, load file path into entry, and display contents in textbox"""
+        """Open file dialog, load file path into entry, and display contents in textbox."""
         file_path = filedialog.askopenfilename(title="Select a file to merge")
         
         if file_path:
+            entry_field.delete(0, ctk.END)
+            entry_field.insert(0, file_path)
+            entry_field.xview_moveto(1.0)
+
             textbox.configure(state="normal", cursor="")
             textbox.unbind("<Button-1>", None)
             textbox.unbind("<B1-Motion>", None)
             textbox.unbind("<Control-a>", None)
             textbox.unbind("<Shift-Left>", None)
             textbox.unbind("<Shift-Right>", None)
-            entry_field.delete(0, ctk.END)
-            entry_field.insert(0, file_path)
-            entry_field.xview_moveto(1.0)
-            with open(file_path, 'r', encoding='utf-8') as file:
-                content = file.read()
-                textbox.delete("1.0", ctk.END)
+            textbox.delete("1.0", ctk.END)
+            try:
+                content, _ = safe_read_file(file_path)
                 textbox.insert("1.0", content)
+            except Exception as read_err:
+                textbox.insert("1.0", f"Error reading file: {read_err}")
+            textbox.configure(state="disabled")
         
-            check_and_compare()
+            update_merge_state()
     
-    def insert_lines_in_batches(text_widget, lines, tag=None, batch_size=100):
-        """Insert lines into a Text widget in batches to prevent UI hangs."""
-        def insert_batch(start_index):
-            end_index = min(start_index + batch_size, len(lines))
-            for i in range(start_index, end_index):
-                line = lines[i]
-                if tag:
-                    text_widget.insert("end", f"{line}\n", tag)
-                else:
-                    text_widget.insert("end", f"{line}\n")
-
-            if end_index < len(lines):
-                text_widget.after(10, insert_batch, end_index)
-
-        insert_batch(0)
+    DIFF_PREVIEW_LINE_LIMIT = 10000
     
-    def check_and_compare():
+    def update_merge_state():
+        """Enable the merge button as soon as both files are selected, and optionally run a diff preview."""
         path1 = fileA_path.get().strip()
         path2 = fileB_path.get().strip()
         
         if path1 and path2 and os.path.isfile(path1) and os.path.isfile(path2):
-            compare_files()
+            auto_merge_button.configure(state="normal")
+            threading.Thread(target=run_diff_preview, args=(path1, path2), daemon=True).start()
+        else:
+            auto_merge_button.configure(state="disabled")
 
-    def compare_files():
-        if not fileA_path or not fileB_path:
-            return
-        
-        fileA_textbox.delete("1.0", "end")
-        fileB_textbox.delete("1.0", "end")
+    def run_diff_preview(path_a, path_b):
+        """Compute a diff preview in a background thread, then push results to UI."""
+        try:
+            content_a, _ = safe_read_file(path_a)
+            content_b, _ = safe_read_file(path_b)
+            lines_a = content_a.splitlines()
+            lines_b = content_b.splitlines()
+            
+            if len(lines_a) + len(lines_b) > DIFF_PREVIEW_LINE_LIMIT:
+                print(f"Skipping diff preview: files too large")
+                return
+            
+            matcher = SequenceMatcher(None, lines_a, lines_b)
+            opcodes = matcher.get_opcodes()
+            
+            set_a = set(lines_a)
+            set_b = set(lines_b)
+            
+            a_segments = []
+            b_segments = []
+            
+            for tag, i1, i2, j1, j2 in opcodes:
+                if tag == "equal":
+                    chunk = "\n".join(lines_a[i1:i2])
+                    a_segments.append((chunk + "\n", None))
+                    b_segments.append((chunk + "\n", None))
+                elif tag == "replace":
+                    a_segments.append(("\n".join(lines_a[i1:i2]) + "\n", "conflict"))
+                    b_segments.append(("\n".join(lines_b[j1:j2]) + "\n", "conflict"))
+                elif tag == "delete":
+                    for line in lines_a[i1:i2]:
+                        t = "unique" if line not in set_b else None
+                        a_segments.append((line + "\n", t))
+                elif tag == "insert":
+                    for line in lines_b[j1:j2]:
+                        t = "unique" if line not in set_a else None
+                        b_segments.append((line + "\n", t))
+            
+            if fileA_path.get().strip() == path_a and fileB_path.get().strip() == path_b:
+                main_window.after(0, lambda: apply_diff_to_ui(a_segments, b_segments))
+            
+        except Exception as diff_err:
+            print(f"Diff preview error: {diff_err}")
+    
+    def apply_diff_to_ui(a_segments, b_segments):
+        """Apply pre-computed diff highlighting to the textboxes (runs on main thread)."""
+        try:
+            fileA_textbox.configure(state="normal")
+            fileB_textbox.configure(state="normal")
+            
+            fileA_textbox.delete("1.0", "end")
+            fileB_textbox.delete("1.0", "end")
 
-        fileA_textbox.tag_config("unique", foreground="blue")
-        fileB_textbox.tag_config("unique", foreground="blue")
-        fileA_textbox.tag_config("conflict", foreground="red")
-        fileB_textbox.tag_config("conflict", foreground="red")
+            fileA_textbox.tag_config("unique", foreground="#4488ff")
+            fileB_textbox.tag_config("unique", foreground="#4488ff")
+            fileA_textbox.tag_config("conflict", foreground="#ff4444")
+            fileB_textbox.tag_config("conflict", foreground="#ff4444")
+            
+            for text, t in a_segments:
+                if t:
+                    fileA_textbox.insert("end", text, t)
+                else:
+                    fileA_textbox.insert("end", text)
 
-        with open(fileA_path.get(), "r", encoding="utf-8-sig") as fA, open(fileB_path.get(), "r", encoding="utf-8-sig") as fB:
-            fileA_lines = fA.read().splitlines()
-            fileB_lines = fB.read().splitlines()
-
-        matcher = SequenceMatcher(None, fileA_lines, fileB_lines)
-        opcodes = matcher.get_opcodes()
-
-        for tag, i1, i2, j1, j2 in opcodes:
-            if tag == "equal":
-                insert_lines_in_batches(fileA_textbox, fileA_lines[i1:i2])
-                insert_lines_in_batches(fileB_textbox, fileB_lines[j1:j2])
-            elif tag == "replace":
-                insert_lines_in_batches(fileA_textbox, fileA_lines[i1:i2], tag="conflict")
-                insert_lines_in_batches(fileB_textbox, fileB_lines[j1:j2], tag="conflict")
-            elif tag == "delete":
-                for line in fileA_lines[i1:i2]:
-                    tag_to_use = "unique" if line not in fileB_lines else None
-                    insert_lines_in_batches(fileA_textbox, [line], tag=tag_to_use)
-            elif tag == "insert":
-                for line in fileB_lines[j1:j2]:
-                    tag_to_use = "unique" if line not in fileA_lines else None
-                    insert_lines_in_batches(fileB_textbox, [line], tag=tag_to_use)
-
-        auto_merge_button.configure(state="normal")
+            for text, t in b_segments:
+                if t:
+                    fileB_textbox.insert("end", text, t)
+                else:
+                    fileB_textbox.insert("end", text)
+            
+            fileA_textbox.configure(state="disabled")
+            fileB_textbox.configure(state="disabled")
+            
+            try:
+                fileA_linenums.redraw()
+                fileB_linenums.redraw()
+            except Exception:
+                pass
+        except Exception as ui_err:
+            print(f"Error applying diff to UI: {ui_err}")
         
         
     # Settings frame
