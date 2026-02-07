@@ -452,9 +452,20 @@ def find_conflicts(file_map):
     return conflicts
 
 def get_load_order(mods_xml_path):
-    tree = ET.parse(mods_xml_path)
-    root = tree.getroot()
-    return [mod.text.replace("\\", "/") for mod in root.find("LoadOrder")]
+    try:
+        tree = ET.parse(mods_xml_path)
+        root = tree.getroot()
+        load_order_element = root.find("LoadOrder")
+        if load_order_element is None:
+            print(f"Warning: No <LoadOrder> element found in {mods_xml_path}")
+            return []
+        return [mod.text.replace("\\", "/") for mod in load_order_element if mod.text]
+    except FileNotFoundError:
+        print(f"Warning: mods.xml not found at {mods_xml_path}")
+        return []
+    except ET.ParseError as e:
+        print(f"Warning: Failed to parse mods.xml: {e}")
+        return []
     
 def update_load_order(mods_xml_path, items):
     """Update the load order in the mods.xml file based on the given items list."""
@@ -543,7 +554,7 @@ def check_for_update(version_label, main_window):
         response.raise_for_status()
         remote_version = response.text.strip()
 
-        if remote_version != "2.0.1":
+        if remote_version != "2.0.2":
             version_label.configure(
                 text=f"Update {remote_version} Available!",
                 text_color="#f88379",
@@ -1317,12 +1328,12 @@ def load_config():
                 if not config["path"].lower().endswith("\\lml"):
                     config["path"] = os.path.join(config["path"], "lml")
 
-            if not os.path.isdir(config["path"]) or not os.access(config["path"], os.R_OK):
+            if not config["path"] or not os.path.isdir(config["path"]) or not os.access(config["path"], os.R_OK):
                 print("Invalid LML folder path in configuration.")
                 raise ValueError("Invalid LML folder path")
 
             return config
-        except (ValueError, KeyError, json.JSONDecodeError) as e:
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as e:
             print(f"Error loading configuration: {e}")
     else:
         print("Configuration file not found. Creating a new one.")
@@ -1352,7 +1363,8 @@ def save_config(path=None, theme=None, api_key=None):
 
     with open(config_path, 'w') as file:
         for key, value in current_config.items():
-            file.write(f'{key}="{value}"\n')
+            value_str = value if value is not None else ""
+            file.write(f'{key}="{value_str}"\n')
 
     if api_key is not None:
         try:
@@ -1364,7 +1376,10 @@ def save_config(path=None, theme=None, api_key=None):
 
 def check_and_save_path(app, entry):
     """Check the provided LML path, save it if valid, and display conflicts if accessible."""
-    selected_folder = entry.get()
+    selected_folder = entry.get().strip()
+    if not selected_folder:
+        CTkMessagebox(title="Error", message="Please enter or browse to your RDR2 folder path.", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
+        return
     lml_folder = os.path.join(selected_folder, "lml") if os.path.basename(selected_folder).lower() == "red dead redemption 2" else selected_folder
     if not os.path.exists(lml_folder):
         try:
@@ -1374,8 +1389,12 @@ def check_and_save_path(app, entry):
             CTkMessagebox(title="Error", message=f"Failed to create LML folder: {e}", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
             return
     if os.path.isdir(lml_folder) and os.access(lml_folder, os.R_OK):
-        save_config(path=selected_folder)
-        check_conflicts(app, lml_folder)
+        try:
+            save_config(path=selected_folder)
+            check_conflicts(app, lml_folder)
+        except Exception as e:
+            print(f"Error loading mod data: {e}")
+            CTkMessagebox(title="Error", message=f"Failed to load mod data from the selected folder:\n{e}\n\nPlease ensure LML is installed correctly.", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
     else:
         CTkMessagebox(title="Error", message="Invalid or inaccessible folder path. Please select a valid RDR2 folder.", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
         
@@ -2141,7 +2160,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
     global config
     
     load_order = get_load_order(os.path.join(lml_folder, "mods.xml"))
-    sorted_mods = [mod for mod in load_order if mod in mods]
+    sorted_mods = [mod for mod in load_order if mod in mods] + [mod for mod in mods if mod not in load_order]
     
     api_key = config.get("api_key", "")
     if api_key:
@@ -2265,7 +2284,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
     settings_button = ctk.CTkButton(button_frame, text="Settings", font=("Segoe UI", 18, "bold"), fg_color="#b22222", hover_color="#8b0000", height=40, border_spacing=10)
     settings_button.pack(fill="x", padx=10, pady=5)
     
-    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.1", font=("Segoe UI", 18, "bold"))
+    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.2", font=("Segoe UI", 18, "bold"))
     version_label.grid(row=5, column=0, sticky="s", padx=10, pady=0)
     
     check_for_update(version_label, main_window)
@@ -2306,9 +2325,9 @@ def display_main_window(app, mods, conflicts, lml_folder):
              "conflicts with mods you haven't even downloaded yet! RDMT also offers download and\n"
              "install support for both ASI and LML mods from Nexus Mods\n"
              "(non-premium users must download through the Nexus Mods website).\n\n\n"
-             "Version 2.0.1 changelog:\n"
+             "Version 2.0.2 changelog:\n"
              "-----\n"
-             "- Fixed a bug affecting the merge tool.\n"
+             "- Fixed first-time setup bugs.\n"
              "-----\n\n"
              "Version 2.0.0 changelog:\n"
              "-----\n"
