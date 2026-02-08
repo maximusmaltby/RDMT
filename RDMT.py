@@ -298,6 +298,35 @@ def three_way_merge(base_lines, a_lines, b_lines, conflict_resolution='A'):
     
     return merged, conflicts
 
+def get_safe_mods_path():
+    """Return the path to the safe mods exclusion list file."""
+    appdata_dir = os.getenv('APPDATA')
+    config_folder = os.path.join(appdata_dir, 'Red Dead Modding Tool', 'config')
+    os.makedirs(config_folder, exist_ok=True)
+    return os.path.join(config_folder, 'safe_mods.json')
+
+def load_safe_mods():
+    """Load the list of mods marked as safe from conflicts."""
+    safe_path = get_safe_mods_path()
+    if os.path.exists(safe_path):
+        try:
+            with open(safe_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return set(data)
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Error loading safe mods list: {e}")
+    return set()
+
+def save_safe_mods(safe_mods):
+    """Save the list of mods marked as safe from conflicts."""
+    safe_path = get_safe_mods_path()
+    try:
+        with open(safe_path, 'w', encoding='utf-8') as f:
+            json.dump(sorted(list(safe_mods)), f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Error saving safe mods list: {e}")
+
 # NXMProxy
 def is_nxmproxy_setup():
     """Check if NXMProxy is set up correctly for RDMT and Red Dead Redemption 2."""
@@ -543,7 +572,11 @@ def get_mods_and_files(lml_folder):
                     file_map[file.lower()].append((mod_name, priority))
     return file_map
 
-def find_conflicts(file_map):
+def find_conflicts(file_map, safe_mods=None):
+    """Find conflicting files between mods, optionally excluding mods marked as safe."""
+    if safe_mods is None:
+        safe_mods = set()
+
     def get_root_folder(mod_path):
         """Extract the root folder of a mod from its path."""
         return mod_path.split("/", 1)[0] if "/" in mod_path else mod_path
@@ -553,10 +586,13 @@ def find_conflicts(file_map):
         if file.lower() == "content.xml":
             continue
         
-        root_folders = {get_root_folder(mod) for mod, _ in mods}
+        # Filter out mods that are in the safe list
+        filtered_mods = [(mod, pri) for mod, pri in mods if get_root_folder(mod) not in safe_mods]
+        
+        root_folders = {get_root_folder(mod) for mod, _ in filtered_mods}
         
         if len(root_folders) > 1:
-            conflicts[file] = mods
+            conflicts[file] = filtered_mods
     return conflicts
 
 def get_load_order(mods_xml_path):
@@ -662,7 +698,7 @@ def check_for_update(version_label, main_window):
         response.raise_for_status()
         remote_version = response.text.strip()
 
-        if remote_version != "2.0.3":
+        if remote_version != "2.0.4":
             version_label.configure(
                 text=f"Update {remote_version} Available!",
                 text_color="#f88379",
@@ -1337,7 +1373,8 @@ def check_conflicts(app, entry_or_path):
         return
 
     file_map = get_mods_and_files(lml_folder)
-    conflicts = find_conflicts(file_map)
+    safe_mods = load_safe_mods()                          # <-- NEW LINE
+    conflicts = find_conflicts(file_map, safe_mods)       # <-- CHANGED: pass safe_mods
     mods = [mod for mod in os.listdir(lml_folder) if os.path.isdir(os.path.join(lml_folder, mod))]
     
     display_main_window(app, mods, conflicts, lml_folder)
@@ -1978,22 +2015,176 @@ def refresh_added(added_listbox, added_description, api_key, show_frame, nexus_f
     threading.Thread(target=fetch_added_mods, daemon=True).start()
         
 def refresh_conflicts(conflict_text, conflicts, lml_folder):
+    """Refresh the conflicts display, sorting mods by load order priority and filtering safe mods."""
     try:
         conflict_text.configure(state="normal")
         file_map = get_mods_and_files(lml_folder)
-        conflicts = find_conflicts(file_map)
-        mods = {mod.replace("\\", "/") for _, mod_list in file_map.items() for mod, _ in mod_list}
+        safe_mods = load_safe_mods()
+        conflicts = find_conflicts(file_map, safe_mods)
+        
+        # Get load order for priority sorting
+        mods_xml_path = os.path.join(lml_folder, "mods.xml")
+        load_order = get_load_order(mods_xml_path)
+        
+        # Build a priority index: lower index = loaded first = lower priority (overwritten by later mods)
+        load_order_index = {mod.replace("\\", "/"): idx for idx, mod in enumerate(load_order)}
+        
         conflict_text.delete('1.0', ctk.END)
+        
+        if safe_mods:
+            conflict_text.insert(ctk.END, f"[{len(safe_mods)} mod(s) excluded as safe]\n\n")
+        
         for file, mods in conflicts.items():
             conflict_text.insert(ctk.END, f"File '{file}' is modified by:\n")
-            for mod, priority in mods:
+            
+            def get_root_folder(mod_path):
+                return mod_path.split("/", 1)[0] if "/" in mod_path else mod_path
+            
+            def sort_key(mod_tuple):
+                mod, priority = mod_tuple
+                root = get_root_folder(mod)
+                # Check both full path and root folder against load order
+                idx = load_order_index.get(mod, load_order_index.get(root, 999999))
+                return idx
+            
+            sorted_mods = sorted(mods, key=sort_key)
+            
+            for i, (mod, priority) in enumerate(sorted_mods):
                 label = f"{mod} (stream)" if priority == 2 else (f"{mod} (replace)" if priority == 1 else mod)
+                
+                # Add priority annotation
+                if len(sorted_mods) > 1:
+                    if i == 0:
+                        label += " (Lowest Priority)"
+                    elif i == len(sorted_mods) - 1:
+                        label += " (Highest Priority)"
+                
                 conflict_text.insert(ctk.END, f" - {label}\n")
             conflict_text.insert(ctk.END, "\n")
+        
+        if not conflicts:
+            conflict_text.insert(ctk.END, "No conflicts found.")
+        
         conflict_text.configure(state="disabled")
     except Exception as e:
         error_message = f"Error refreshing conflicts: {str(e)}"
         CTkMessagebox(title="Error", message=error_message, button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
+
+def export_conflicts(conflict_text):
+    """Export the conflicts report to a text file."""
+    try:
+        content = conflict_text.get("1.0", ctk.END).strip()
+        if not content:
+            CTkMessagebox(title="Warning", message="No conflict data to export.", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="warning")
+            return
+        
+        save_path = filedialog.asksaveasfilename(
+            title="Export Conflicts Report",
+            defaultextension=".txt",
+            initialfile="RDMT_Conflicts_Report.txt",
+            initialdir=os.path.join(os.path.expanduser("~"), "Downloads"),
+            filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")]
+        )
+        
+        if not save_path:
+            return
+        
+        with open(save_path, 'w', encoding='utf-8') as f:
+            f.write(f"Red Dead Modding Tool - Conflicts Report\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"{'=' * 50}\n\n")
+            f.write(content)
+        
+        CTkMessagebox(title="Red Dead Modding Tool", message=f"Conflicts report exported to:\n{save_path}", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05)
+    except Exception as e:
+        CTkMessagebox(title="Error", message=f"Failed to export conflicts report:\n{e}", button_color="#b22222", button_hover_color="#8b0000", fade_in_duration=0.05, icon="cancel")
+
+
+def manage_safe_mods_dialog(main_window, lml_folder, conflict_text, conflicts):
+    """Open a dialog to manage the list of mods excluded from conflict checking."""
+    dialog = ctk.CTkToplevel(main_window)
+    
+    dialog.withdraw()
+    
+    dialog.title("Manage Safe Mods (Excluded from Conflicts)")
+    
+    dialog.focus_set()
+    dialog.grab_set()
+
+    screen_width = dialog.winfo_screenwidth()
+    screen_height = dialog.winfo_screenheight()
+    initial_width = min(600, int(screen_width * 0.9))
+    initial_height = min(500, int(screen_height * 0.9))
+
+    x = max(0, (screen_width - initial_width) // 2)
+    y = max(0, (screen_height - initial_height) // 2)
+
+    dialog.geometry(f"{initial_width}x{initial_height}+{x}+{y}")
+    dialog.wm_minsize(initial_width, initial_height)
+    dialog.resizable(True, True)
+    
+    icon_path = os.path.join(image_path, "rdmt.ico")
+    dialog.after(201, lambda: dialog.iconbitmap(icon_path))
+    
+    safe_mods = load_safe_mods()
+    
+    # Header
+    header_frame = ctk.CTkFrame(dialog)
+    header_frame.pack(fill="x", padx=10, pady=(10, 5))
+    
+    ctk.CTkLabel(header_frame, text="Check mods to exclude from conflict detection:", font=("Segoe UI", 14, "bold")).pack(side="left", padx=5)
+    
+    # Scrollable frame for mod checkboxes
+    scroll_frame = ctk.CTkScrollableFrame(dialog, width=550, height=350)
+    scroll_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    # Get all mods from the LML folder
+    all_mods = sorted([
+        mod for mod in os.listdir(lml_folder)
+        if os.path.isdir(os.path.join(lml_folder, mod))
+    ], key=str.lower)
+    
+    checkbox_vars = {}
+    for mod_name in all_mods:
+        var = ctk.BooleanVar(value=(mod_name in safe_mods))
+        checkbox_vars[mod_name] = var
+        cb = ctk.CTkCheckBox(
+            scroll_frame,
+            text=mod_name,
+            variable=var,
+            font=("Segoe UI", 14),
+            fg_color="#b22222",
+            hover_color="#8b0000"
+        )
+        cb.pack(anchor="w", padx=10, pady=2)
+    
+    # Buttons
+    button_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+    button_frame.pack(fill="x", padx=10, pady=10)
+    
+    def save_and_refresh():
+        new_safe_mods = {mod for mod, var in checkbox_vars.items() if var.get()}
+        save_safe_mods(new_safe_mods)
+        refresh_conflicts(conflict_text, conflicts, lml_folder)
+        dialog.destroy()
+    
+    def select_all():
+        for var in checkbox_vars.values():
+            var.set(True)
+    
+    def deselect_all():
+        for var in checkbox_vars.values():
+            var.set(False)
+    
+    ctk.CTkButton(button_frame, text="Select All", command=select_all, fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold")).pack(side="left", padx=5)
+    ctk.CTkButton(button_frame, text="Deselect All", command=deselect_all, fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold")).pack(side="left", padx=5)
+    ctk.CTkButton(button_frame, text="Save & Refresh", command=save_and_refresh, fg_color="#b22222", hover_color="#8b0000", font=("Segoe UI", 14, "bold")).pack(side="right", padx=5)
+    ctk.CTkButton(button_frame, text="Cancel", command=dialog.destroy, fg_color="darkgrey", hover_color="grey", font=("Segoe UI", 14, "bold")).pack(side="right", padx=5)
+    
+    dialog.transient(main_window)
+    dialog.grab_set()
+    dialog.deiconify()
+    dialog.wait_window()
 
 def clean_mods(lml_folder):
     """Move non-game files from the game root to the RDMT backup folder."""
@@ -2392,7 +2583,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
     settings_button = ctk.CTkButton(button_frame, text="Settings", font=("Segoe UI", 18, "bold"), fg_color="#b22222", hover_color="#8b0000", height=40, border_spacing=10)
     settings_button.pack(fill="x", padx=10, pady=5)
     
-    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.3", font=("Segoe UI", 18, "bold"))
+    version_label = ctk.CTkLabel(sidebar_frame, text="Version 2.0.4", font=("Segoe UI", 18, "bold"))
     version_label.grid(row=5, column=0, sticky="s", padx=10, pady=0)
     
     check_for_update(version_label, main_window)
@@ -2433,22 +2624,14 @@ def display_main_window(app, mods, conflicts, lml_folder):
              "conflicts with mods you haven't even downloaded yet! RDMT also offers download and\n"
              "install support for both ASI and LML mods from Nexus Mods\n"
              "(non-premium users must download through the Nexus Mods website).\n\n\n"
-             "Version 2.0.3 changelog:\n"
+             "Version 2.0.4 changelog:\n"
              "-----\n"
+             "- Mods are now sorted from lowest to highest priority and labelled accordingly.\n"
+             "- Conflicts report can now be exported to a text file.\n"
+             "- Added option to manage 'safe mods' (mods excluded from conflict checking).\n"
+             "- Conflict textbox now supports text selection and copying.\n"
              "- Rebuilt merge tool logic and fixed crashes.\n"
              "- Fixed first-time setup bugs.\n"
-             "-----\n\n"
-             "Version 2.0.0 changelog:\n"
-             "-----\n"
-             "- Application rebrand.\n"
-             "- Added Nexus Mods API integration.\n"
-             "- Added download, install and conflict detection support for Nexus Mods.\n"
-             "- Added NXM link handling via NXMProxy.\n"
-             "- Improved program performance.\n"
-             "- Added conflict refresh button.\n"
-             "- Updated conflict detection logic.\n"
-             "- Updated merge tool logic.\n"
-             "- Bug and crash fixes.\n"
              "-----",
         font=("Segoe UI", 17),
         fg_color="transparent"
@@ -3036,6 +3219,7 @@ def display_main_window(app, mods, conflicts, lml_folder):
             added_install_tooltip = CTkToolTip(install_added_mod_button, message="This feature is available to Nexus Mods Premium users only.\nThis is a decision made by Nexus Mods, not myself.").show()
             
     # Conflicts frame
+
     conflicts_header_frame = ctk.CTkFrame(conflicts_frame)
     conflicts_header_frame.pack(fill="x", anchor="n", padx=10, pady=(0, 5))
     ctk.CTkLabel(conflicts_header_frame, text="Conflicts", font=("Segoe UI", 22, "bold")).pack(side="left", padx=5, pady=10)
@@ -3051,17 +3235,34 @@ def display_main_window(app, mods, conflicts, lml_folder):
     )
     refresh_conflicts_button.pack(side="right", padx=10, pady=10)
     
+    export_conflicts_button = ctk.CTkButton(
+        conflicts_header_frame,
+        text="Export",
+        fg_color="#b22222",
+        hover_color="#8b0000",
+        font=("Segoe UI", 16, "bold"),
+        height=30,
+        command=lambda: export_conflicts(conflict_text)
+    )
+    export_conflicts_button.pack(side="right")
+    
+    safe_mods_button = ctk.CTkButton(
+        conflicts_header_frame,
+        text="Safe Mods",
+        fg_color="#b22222",
+        hover_color="#8b0000",
+        font=("Segoe UI", 16, "bold"),
+        height=30,
+        command=lambda: manage_safe_mods_dialog(main_window, lml_folder, conflict_text, conflicts)
+    )
+    safe_mods_button.pack(side="right", padx=10)
+    safe_mods_tooltip = CTkToolTip(safe_mods_button, message="Mark mods as safe to exclude them from conflict detection.")
+    
     conflicts_container_frame = ctk.CTkFrame(conflicts_frame, fg_color="transparent")
     conflicts_container_frame.pack(fill="both", expand=True, padx=10, pady=10)
     
-    conflict_text = ctk.CTkTextbox(conflicts_container_frame, wrap="none", font=("Segoe UI", 17), height=650, width=500, border_width=2, border_color="#545454", cursor="arrow")
+    conflict_text = ctk.CTkTextbox(conflicts_container_frame, wrap="none", font=("Segoe UI", 17), height=650, width=500, border_width=2, border_color="#545454")
     conflict_text.pack(side="left", fill="both", expand=True)
-    
-    conflict_text.bind("<Button-1>", lambda e: "break")
-    conflict_text.bind("<B1-Motion>", lambda e: "break")
-    conflict_text.bind("<Control-a>", lambda e: "break")
-    conflict_text.bind("<Shift-Left>", lambda e: "break")
-    conflict_text.bind("<Shift-Right>", lambda e: "break")
 
     if conflicts:
         refresh_conflicts(conflict_text, conflicts, lml_folder)
